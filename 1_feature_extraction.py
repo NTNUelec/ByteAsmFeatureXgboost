@@ -3,6 +3,8 @@
 import os
 import numpy as np
 from header_construction import *
+import mahotas
+#from pwn import *
 #from feature_extraction import *
 #import entropy
 
@@ -64,22 +66,70 @@ def get_quantile_diffs(block_entropys, threshold_list):
 
     return quantile_diffs
 
+
 def get_statistic_values(block_entropys):
-	mean     = np.mean(block_entropys)
-	variance = np.var(block_entropys)
-	median   = np.median(block_entropys)
-	maximum  = np.max(block_entropys)
-	minimum  = np.min(block_entropys)
-	max_min  = maximum - minimum
+    mean     = np.mean(block_entropys)
+    variance = np.var(block_entropys)
+    median   = np.median(block_entropys)
+    maximum  = np.max(block_entropys)
+    minimum  = np.min(block_entropys)
+    max_min  = maximum - minimum
 
-	return [mean, variance, median, maximum, minimum, max_min]
+    return [mean, variance, median, maximum, minimum, max_min]
 
+
+def get_entropy_diffs(block_entropys):
+    entropy_diffs = np.diff(block_entropys)
+
+    return entropy_diffs
+
+
+def get_entropy_diffs_quantile_diffs(block_entropys, threshold_list):
+    entropy_diffs = get_entropy_diffs(block_entropys)
+    entropy_diffs_quantile_diffs = get_quantile_diffs(entropy_diffs, threshold_list)
+
+    return  entropy_diffs_quantile_diffs
+
+
+def get_entropy_diffs_statistic_values(block_entropys):
+    entropy_diffs = get_entropy_diffs(block_entropys)
+    entropy_diffs_statistic_values = get_statistic_values(entropy_diffs)
+
+    return entropy_diffs_statistic_values
+
+
+def get_zone_quantile_diffs_statistic_values(block_entropys, zone_num, threshold_list):
+    zone_quantile_diffs_statistic_values = []
+    zone_size = len(block_entropys) // zone_num
+
+    for i in range(zone_num):
+        zone_entropys       = block_entropys[i * zone_size: (i + 1) * zone_size]
+        zone_quantile_diffs = get_quantile_diffs(zone_entropys, threshold_list)
+        zone_quantile_diffs_statistic_values.extend(zone_quantile_diffs)
+
+        zone_statistic_values = get_statistic_values(zone_entropys)
+        zone_quantile_diffs_statistic_values.extend(zone_statistic_values)
+
+    return zone_quantile_diffs_statistic_values
+
+
+def get_percentile(block_entropys, num, diffs=False):
+    sorted_block_entropys = np.sort(block_entropys)
+    step = np.floor(float(len(sorted_block_entropys)) // num) - 1
+    percentile_values = [sorted_block_entropys[int(step) * i] for i in range(num)]
+
+    if diffs:
+        percentile_values_diffs = np.ediff1d(percentile_values, to_begin=percentile_values[0])
+        return percentile_values_diffs        
+    else:
+        return percentile_values
 
 
 def get_byte_entropy(int_code):
     int_code_len   = len(int_code)
     windows_size   = 10000
     stride_size    = 100
+    zone_num       = 4 
     block_size     = ((int_code_len - windows_size) // stride_size) + 1
     block_entropys = np.zeros((block_size))
 
@@ -115,11 +165,191 @@ def get_byte_entropy(int_code):
             block_entropys[i // stride_size] = entropy
 
 
-    quantile_diffs   = get_quantile_diffs(block_entropys, np.arange(0.2, 4.4, 0.2)) # 21 features
-    statistic_values = get_statistic_values(block_entropys)                         #  6 features
+    quantile_diffs                       = get_quantile_diffs(block_entropys, np.arange(0.2, 4.4, 0.2))                                 #  21 features
+    statistic_values                     = get_statistic_values(block_entropys)                                                         #   6 features
+    entropy_diffs_quantile_diffs         = get_entropy_diffs_quantile_diffs(block_entropys, np.arange(-0.1, 0.11, 0.01))                #  21 features   
+    entropy_diffs_statistic_values       = get_entropy_diffs_statistic_values(block_entropys)                                           #   6 features
+    zone_quantile_diffs_statistic_values = get_zone_quantile_diffs_statistic_values(block_entropys, zone_num, np.arange(0.2, 4.4, 0.2)) # 108 features
+    percentile_values                    = get_percentile(block_entropys, 20, diffs=False)                                              #  20 features    
+    percentile_values_diffs              = get_percentile(block_entropys, 20, diffs=True)                                               #  20 features
+    total_entropy                        = np.mean(block_entropys)                                                                      #   1 features              
+  
+    byte_entropy = []
+    byte_entropy.extend(quantile_diffs)
+    byte_entropy.extend(statistic_values)
+    byte_entropy.extend(entropy_diffs_quantile_diffs)
+    byte_entropy.extend(entropy_diffs_statistic_values)
+    byte_entropy.extend(zone_quantile_diffs_statistic_values)
+    byte_entropy.extend(percentile_values)
+    byte_entropy.extend(percentile_values_diffs)
+    byte_entropy.append(total_entropy)  
+
+    return byte_entropy
+
+
+def byte_make_image(int_code):
+    size = int(np.sqrt(len(int_code)))
+    img_array = int_code[:size ** 2]   
+    img_array = np.reshape(img_array, (size, size))
+    
+    return img_array
+
+
+def get_byte_image1(int_code):
+    img1_feature      = []
+    img_array         = byte_make_image(int_code)
+    haralick_features = mahotas.features.haralick(img_array)
+
+    for i in range(len(haralick_features)):
+        for j in range(len(haralick_features[0])):            
+            img1_feature.append(haralick_features[i][j])
+
+    return img1_feature
+
+
+def get_byte_image2(int_code):
+    img_array    = byte_make_image(int_code)
+    lbp_features = mahotas.features.lbp(img_array, 10, 10, ignore_zeros=False)
+    img2_feature = lbp_features.tolist()    
+
+    return img2_feature
+
+
+def get_str_len_count(int_code, str_start_end, ascii_list):
+    max_str_num = str_start_end.shape[0]
    
+    now_end = len(int_code) - 1
+    pre_end = -1
+    state   = 0
+   
+    min_length  = 4
+    count_1     = 0
+    count_2     = 0
+    count_3     = 0
+    now_str_num = 0
+
+    while now_end >= 1:
+        # 0x00 is a string end
+        if int_code[now_end] == 0:
+            if (state == 1):               
+                diff = pre_end - now_end - 1
+
+                if (diff >= min_length):
+                    str_start_end[now_str_num, 0] = now_end + 1
+                    str_start_end[now_str_num, 1] = pre_end
+                    now_str_num += 1
+
+                elif (diff == 1):
+                    count_1 += 1
+
+                elif (diff == 2):
+                    count_2 += 1
+
+                elif (diff == 3):
+                    count_3 += 1
+                    
+            state   = 1
+            pre_end = now_end
+
+        elif int_code[now_end] not in ascii_list:                
+            if (state == 1):
+                state = 0
+                diff  = pre_end - now_end - 1
+
+                if (diff >= min_length):
+                    str_start_end[now_str_num, 0] = now_end + 1
+                    str_start_end[now_str_num, 1] = pre_end
+                    now_str_num += 1
+
+                elif (diff == 1):
+                    count_1 += 1
+
+                elif (diff == 2):
+                    count_2 += 1
+
+                elif (diff == 3):
+                    count_3 += 1
+        
+        now_end -= 1
+
+        if now_str_num == max_str_num:
+            break
+
+    return now_str_num, count_1, count_2, count_3
 
 
+def get_strings(int_code):
+    name = ''
+    ascii_list = np.array([i for i in range(32, 127)] + [13, 10])
+    ascii_list.sort()
+   
+    str_start_end = np.zeros((15000, 2), dtype=np.int64)    
+    now_str_num, count_1, count_2, count_3 = get_str_len_count(int_code, str_start_end, ascii_list)
+    
+    string_total_len = np.sum(str_start_end[:, 1] - str_start_end[:, 0]) + count_1 + count_2 + count_3
+    string_ratio     = float(string_total_len) / len(int_code)
+
+    strings = []
+    for i in range(now_str_num):
+        strings.extend([''.join([chr(x) for x in int_code[str_start_end[i, 0]: str_start_end[i, 1]]])])   
+
+    return name, strings, count_1, count_2, count_3, string_total_len, string_ratio
+
+
+def extract_length(name, strings, count_1, count_2, count_3, string_total_len, string_ratio):    
+    # min string length is 0, and max is 10000
+    min_len, max_len = 0, 10000   
+    len_arrays = np.array([len(y) for y in strings] + [min_len] + [max_len])   
+    bincounts  = np.bincount(len_arrays)
+    bincounts[0]     -= 1
+    bincounts[10000] -= 1   
+   
+    counts_0_10       = np.sum(bincounts[0:10]) + count_1 + count_2 + count_3
+    counts_10_30      = np.sum(bincounts[10:30])
+    counts_30_60      = np.sum(bincounts[30:60])
+    counts_60_90      = np.sum(bincounts[60:90]) 
+    counts_90_100     = np.sum(bincounts[90:100]) 
+    counts_100_150    = np.sum(bincounts[100:150])
+    counts_150_250    = np.sum(bincounts[150:250])
+    counts_250_400    = np.sum(bincounts[250:450])
+    counts_400_600    = np.sum(bincounts[400:600])
+    counts_600_900    = np.sum(bincounts[600:900])
+    counts_900_1300   = np.sum(bincounts[900:1300])
+    counts_1300_2000  = np.sum(bincounts[1300:2000])
+    counts_2000_3000  = np.sum(bincounts[2000:3000])
+    counts_3000_6000  = np.sum(bincounts[3000:6000])
+    counts_6000_15000 = np.sum(bincounts[6000:15000])
+
+
+    feature = []
+    feature.extend([count_1, count_2, count_3])
+    feature.extend([bincounts[i] for i in range(4, 100)])
+    feature.extend([counts_0_10,
+                    counts_10_30,
+                    counts_30_60,
+                    counts_60_90,
+                    counts_90_100,
+                    counts_100_150,
+                    counts_150_250,
+                    counts_250_400,
+                    counts_400_600,
+                    counts_600_900,
+                    counts_900_1300,
+                    counts_1300_2000,
+                    counts_2000_3000,
+                    counts_3000_6000,
+                    counts_6000_15000,
+                    string_total_len,
+                    string_ratio
+                    ])                          
+                   
+    return feature
+
+def get_byte_string_lengths(int_code):
+    name, strings, count_1, count_2, count_3, string_total_len, string_ratio = get_strings(int_code)
+    byte_string_lengths = extract_length(name, strings, count_1, count_2, count_3, string_total_len, string_ratio)
+
+    return byte_string_lengths
 
 
 def feature_extraction(malware_exe_dir, benign_exe_dir, csv_file_path):
@@ -147,20 +377,31 @@ def feature_extraction(malware_exe_dir, benign_exe_dir, csv_file_path):
 
     for i, malware_exe_name in enumerate(malware_exe_names):    
         malware_exe_path = malware_exe_dir + "/" + malware_exe_name
-        f = open(malware_exe_path, "rb")
-        byte_code = get_byte_code(f)
+
+        """ dump-based features """
+        """
+        file      = open(malware_exe_path, "rb")
+        
+        byte_code = get_byte_code(file)
         int_code  = get_int_code(byte_code)
 
-        byte_oneg        =  get_byte_1gram(int_code) 
-        byte_meta_data   =  get_byte_meta_data(byte_code)
-        byte_entropy     =  get_byte_entropy(int_code)
-        #byte_image1      = byte_image1(f) 
-        #byte_image2      = byte_image2(f)
-        #
+        byte_oneg        = get_byte_1gram(int_code)          #   2 features
+        byte_meta_data   = get_byte_meta_data(byte_code)     # 256 features
+        byte_entropy     = get_byte_entropy(int_code)        # 203 features        
+        byte_image1      = get_byte_image1(int_code)         #  52 features     
+        byte_image2      = get_byte_image2(int_code)         # 108 features 
+        byte_str_lengths = get_byte_string_lengths(int_code) # 116 features
 
-        #byte_str_lengths = byte_string_lengths(f)
+        file.close()
+        """
+        """ disassemble-based features """
+        cmd_exe_to_asm = "objdump "
+        file      = open(malware_exe_path, "rb")
+        byte_code = get_byte_code(file)
+        asm_code  = disasm(byte_code, arch = 'i386')
+        print(asm_code)
 
-        #asm_meta_data           = asm_meta_data(malware_exe_path, f)
+        asm_meta_data           = asm_meta_data(malware_exe_path, f)
         #asm_symbols             = asm_symbols(f)
         #asm_registers           = asm_registers(f)
         #asm_opcodes             = asm_opcodes(f)
