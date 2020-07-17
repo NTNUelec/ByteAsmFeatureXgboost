@@ -4,6 +4,7 @@ import os
 import numpy as np
 from header_construction import *
 import mahotas
+from numba import jit, prange
 #from pwn import *
 #from feature_extraction import *
 #import entropy
@@ -13,54 +14,50 @@ benign_exe_dir  = "39000_benign_exe"
 csv_file_path   = "dataset_csv/1804_features.csv"
 APIS_PATH       = "APIs.txt"
 
-def get_byte_code(f):
-    byte_code = f.read()
-
-    return byte_code
 
 
-def get_int_code(byte_code):   
-    int_code = np.zeros((len(byte_code)), dtype=np.uint8)
-
-    for i, byte in enumerate(byte_code):            
-        int_code[i] = int(byte)
+def get_int_code(exe_path):   
+    int_code = np.fromfile(exe_path, dtype=np.uint8)
 
     return int_code
         
-
+@jit(parallel=True)
 def get_byte_1gram(int_code):
-    one_byte = np.zeros((256), dtype=np.uint32)
+    one_byte = np.zeros((256))
 
-    for integer in int_code:
-        one_byte[integer] += 1
+    for i in prange(len(int_code)):
+        value = int_code[i]
+        one_byte[value] += 1
 
     return one_byte
 
 
-def get_byte_meta_data(byte_code):
+def get_byte_meta_data(int_code):
     meta_data = []
 
     # file size
-    file_size = len(byte_code)
+    file_size = len(int_code)
     meta_data.append(file_size)
 
     # PE header start address (3C to 3F)
-    start_address_hexs = byte_code[int(0x3C):int(0x40)]
+    start_address_hexs = int_code[int(0x3C):int(0x40)]
     start_address_int  = 0
+
     for i, start_address_hex in enumerate(start_address_hexs):
-        start_address_int += int(start_address_hex) * (256 ** i)    
+        start_address_int += start_address_hex * (256 ** i)    
     meta_data.append(start_address_int)    
 
     return meta_data
 
-
+@jit(parallel=True)
 def get_quantile_diffs(block_entropys, threshold_list):
-    quantile_diffs = []
+    quantile_diffs = np.zeros((len(threshold_list)))
     prev_quantile  = 0
 
-    for threshold in threshold_list:
-        now_quantile = float((block_entropys < threshold).sum()) / len(block_entropys)
-        quantile_diffs.append(now_quantile - prev_quantile)
+    for i in prange(len(threshold_list)):
+        threshold    = threshold_list[i]
+        now_quantile = float((block_entropys < threshold).sum()) / len(block_entropys)        
+        quantile_diffs[i] = now_quantile - prev_quantile
 
         prev_quantile = now_quantile
 
@@ -97,20 +94,34 @@ def get_entropy_diffs_statistic_values(block_entropys):
 
     return entropy_diffs_statistic_values
 
-
-def get_zone_quantile_diffs_statistic_values(block_entropys, zone_num, threshold_list):
-    zone_quantile_diffs_statistic_values = []
+#@jit(parallel=True)
+def get_zone_quantile_diffs(block_entropys, zone_num, threshold_list):
+    zone_quantile_diffs = np.zeros((zone_num * len(threshold_list)))
     zone_size = len(block_entropys) // zone_num
 
-    for i in range(zone_num):
-        zone_entropys       = block_entropys[i * zone_size: (i + 1) * zone_size]
-        zone_quantile_diffs = get_quantile_diffs(zone_entropys, threshold_list)
-        zone_quantile_diffs_statistic_values.extend(zone_quantile_diffs)
+    for i in prange(zone_num):
+        zone_entropys                  = block_entropys[i * zone_size: (i + 1) * zone_size]
+        zone_quantile_diff             = get_quantile_diffs(zone_entropys, threshold_list)
+        start                          = i * len(zone_quantile_diff)
+        end                            = (i + 1) * len(zone_quantile_diff)
+        zone_quantile_diffs[start:end] = zone_quantile_diff    
 
-        zone_statistic_values = get_statistic_values(zone_entropys)
-        zone_quantile_diffs_statistic_values.extend(zone_statistic_values)
+    return zone_quantile_diffs
 
-    return zone_quantile_diffs_statistic_values
+
+#@jit(parallel=True)
+def get_zone_statistic_values(block_entropys, zone_num):
+    zone_statistic_values = np.zeros((zone_num * 6))
+    zone_size = len(block_entropys) // zone_num
+
+    for i in prange(zone_num):
+        zone_entropys                    = block_entropys[i * zone_size: (i + 1) * zone_size]
+        zone_statistic_value             = get_statistic_values(zone_entropys)
+        start                            = i * len(zone_statistic_value)
+        end                              = (i + 1) * len(zone_statistic_value)
+        zone_statistic_values[start:end] = zone_statistic_value
+
+    return zone_statistic_values
 
 
 def get_percentile(block_entropys, num, diffs=False):
@@ -124,7 +135,7 @@ def get_percentile(block_entropys, num, diffs=False):
     else:
         return percentile_values
 
-
+#@jit(parallel=True)
 def get_byte_entropy(int_code):
     int_code_len   = len(int_code)
     windows_size   = 10000
@@ -165,21 +176,23 @@ def get_byte_entropy(int_code):
             block_entropys[i // stride_size] = entropy
 
 
-    quantile_diffs                       = get_quantile_diffs(block_entropys, np.arange(0.2, 4.4, 0.2))                                 #  21 features
-    statistic_values                     = get_statistic_values(block_entropys)                                                         #   6 features
-    entropy_diffs_quantile_diffs         = get_entropy_diffs_quantile_diffs(block_entropys, np.arange(-0.1, 0.11, 0.01))                #  21 features   
-    entropy_diffs_statistic_values       = get_entropy_diffs_statistic_values(block_entropys)                                           #   6 features
-    zone_quantile_diffs_statistic_values = get_zone_quantile_diffs_statistic_values(block_entropys, zone_num, np.arange(0.2, 4.4, 0.2)) # 108 features
-    percentile_values                    = get_percentile(block_entropys, 20, diffs=False)                                              #  20 features    
-    percentile_values_diffs              = get_percentile(block_entropys, 20, diffs=True)                                               #  20 features
-    total_entropy                        = np.mean(block_entropys)                                                                      #   1 features              
+    quantile_diffs                 = get_quantile_diffs(block_entropys, np.arange(0.2, 4.4, 0.2))                  #  21 features
+    statistic_values               = get_statistic_values(block_entropys)                                          #   6 features
+    entropy_diffs_quantile_diffs   = get_entropy_diffs_quantile_diffs(block_entropys, np.arange(-0.1, 0.11, 0.01)) #  21 features   
+    entropy_diffs_statistic_values = get_entropy_diffs_statistic_values(block_entropys)                            #   6 features
+    zone_quantile_diffs            = get_zone_quantile_diffs(block_entropys, zone_num, np.arange(0.2, 4.4, 0.2))   #  84 features
+    zone_statistic_values          = get_zone_statistic_values(block_entropys, zone_num)                           #  24 features
+    percentile_values              = get_percentile(block_entropys, 20, diffs=False)                               #  20 features    
+    percentile_values_diffs        = get_percentile(block_entropys, 20, diffs=True)                                #  20 features
+    total_entropy                  = np.mean(block_entropys)                                                       #   1 features              
   
     byte_entropy = []
     byte_entropy.extend(quantile_diffs)
     byte_entropy.extend(statistic_values)
     byte_entropy.extend(entropy_diffs_quantile_diffs)
     byte_entropy.extend(entropy_diffs_statistic_values)
-    byte_entropy.extend(zone_quantile_diffs_statistic_values)
+    byte_entropy.extend(zone_quantile_diffs)
+    byte_entropy.extend(zone_statistic_values)
     byte_entropy.extend(percentile_values)
     byte_entropy.extend(percentile_values_diffs)
     byte_entropy.append(total_entropy)  
@@ -378,23 +391,20 @@ def feature_extraction(malware_exe_dir, benign_exe_dir, csv_file_path):
     for i, malware_exe_name in enumerate(malware_exe_names):    
         malware_exe_path = malware_exe_dir + "/" + malware_exe_name
 
-        """ dump-based features """
-        """
-        file      = open(malware_exe_path, "rb")
-        
-        byte_code = get_byte_code(file)
-        int_code  = get_int_code(byte_code)
+        """ dump-based features """     
+       
+        int_code  = get_int_code(malware_exe_path)
 
         byte_oneg        = get_byte_1gram(int_code)          #   2 features
-        byte_meta_data   = get_byte_meta_data(byte_code)     # 256 features
+        byte_meta_data   = get_byte_meta_data(int_code)      # 256 features
         byte_entropy     = get_byte_entropy(int_code)        # 203 features        
         byte_image1      = get_byte_image1(int_code)         #  52 features     
         byte_image2      = get_byte_image2(int_code)         # 108 features 
         byte_str_lengths = get_byte_string_lengths(int_code) # 116 features
 
-        file.close()
-        """
+      
         """ disassemble-based features """
+        """
         cmd_exe_to_asm = "objdump "
         file      = open(malware_exe_path, "rb")
         byte_code = get_byte_code(file)
@@ -402,6 +412,7 @@ def feature_extraction(malware_exe_dir, benign_exe_dir, csv_file_path):
         print(asm_code)
 
         asm_meta_data           = asm_meta_data(malware_exe_path, f)
+        """
         #asm_symbols             = asm_symbols(f)
         #asm_registers           = asm_registers(f)
         #asm_opcodes             = asm_opcodes(f)
