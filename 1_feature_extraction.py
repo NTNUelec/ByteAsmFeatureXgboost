@@ -5,6 +5,7 @@ import numpy as np
 from header_construction import *
 import mahotas
 from numba import jit, prange
+import r2pipe
 #from pwn import *
 #from feature_extraction import *
 #import entropy
@@ -365,6 +366,174 @@ def get_byte_string_lengths(int_code):
     return byte_string_lengths
 
 
+def get_asm_code(exe_path):
+    file = r2pipe.open(exe_path)
+    asm_code = file.cmd('pd $s')
+    asm_code = np.array(asm_code.split("\n"))
+
+    return asm_code
+
+
+def get_asm_meta_data(asm_code):   
+    meta_data = []
+
+    # file size
+    file_size = len(asm_code)
+    meta_data.append(file_size)
+
+    # row number
+    row_num = 0
+    for row in asm_code:
+        row_num += 1
+    meta_data.append(row_num)
+
+    return meta_data
+
+
+def get_asm_symbols(asm_code):
+    symbols = np.zeros((7))
+
+    for row in asm_code:
+        if '*' in row:
+            symbols[0] += 1
+        if '-' in row:
+            symbols[1] += 1
+        if '+' in row:
+            symbols[2] += 1
+        if '[' in row:
+            symbols[3] += 1
+        if ']' in row:
+            symbols[4] += 1
+        if '@' in row:
+            symbols[5] += 1
+        if '?' in row:
+            symbols[6] += 1
+
+    return symbols
+
+
+def get_asm_registers(asm_code):
+    registers = ['edx','esi','es','fs','ds','ss','gs','cs','ah','al',
+                 'ax','bh','bl','bx','ch','cl','cx','dh','dl','dx',
+                 'eax','ebp','ebx','ecx','edi','esp']
+
+    registers_values = np.zeros((len(registers))) 
+
+    for row in asm_code:
+        parts =   row.replace(',', ' ')
+        parts = parts.replace('+', ' ')
+        parts = parts.replace('*', ' ')
+        parts = parts.replace('[', ' ')
+        parts = parts.replace(']', ' ')
+        parts = parts.replace('-', ' ')
+        parts = parts.split()
+
+        for register in registers:
+            registers_values[registers.index(register)] += parts.count(register)
+            
+    return registers_values
+
+
+def get_asm_opcodes(asm_code):
+    opcodes = ['add','al','bt','call','cdq','cld','cli','cmc','cmp','const','cwd','daa','db'
+                ,'dd','dec','dw','endp','ends','faddp','fchs','fdiv','fdivp','fdivr','fild'
+                ,'fistp','fld','fstcw','fstcwimul','fstp','fword','fxch','imul','in','inc'
+                ,'ins','int','jb','je','jg','jge','jl','jmp','jnb','jno','jnz','jo','jz'
+                ,'lea','loope','mov','movzx','mul','near','neg','not','or','out','outs'
+                ,'pop','popf','proc','push','pushf','rcl','rcr','rdtsc','rep','ret','retn'
+                ,'rol','ror','sal','sar','sbb','scas','setb','setle','setnle','setnz'
+                ,'setz','shl','shld','shr','sidt','stc','std','sti','stos','sub','test'
+                ,'wait','xchg','xor']
+
+    opcodes_values = np.zeros((len(opcodes))) 
+
+    for row in asm_code:
+        parts = row.split()
+
+        for opcode in opcodes:
+            if opcode in parts:
+                opcodes_values[opcodes.index(opcode)] += 1
+                break
+
+    return opcodes_values
+
+
+def read_api_file(APIS_PATH):
+    file = open(APIS_PATH, "r")
+    content = file.read()
+    apis = np.array(content.split(","))
+
+    return apis
+
+
+def get_asm_APIs(asm_code, apis):
+    apis_values = np.zeros((len(apis)))
+    for row in asm_code:      
+        for i in range(len(apis)):
+            if apis[i] in row:
+                apis_values[i] += 1 
+                break
+
+    return apis_values
+
+
+def get_asm_sections(asm_code):
+    section_names = []
+    for row in asm_code:
+        section_name = [row[0: np.core.defchararray.index(row, ':')]]
+        if section_name != 'HEADER':
+            section_names += section_name
+
+    known_sections = ['.text', '.data', '.bss', '.rdata', '.edata', '.idata', '.rsrc', '.tls', '.reloc']
+    sections_values = [0]*24
+    unknown_sections = []
+    unknown_lines = 0
+    number_of_sections = len(section_names)
+
+    for section in section_names:
+
+        if section in known_sections:
+            section_index = known_sections.index(section)
+            sections_values[section_index] += 1
+        else:
+            unknown_sections.append(section)
+            unknown_lines += 1
+
+    uni_section_names_len = len(np.unique(section_names))
+    uni_unknown_section_names_len = len(np.unique(unknown_sections))
+    uni_known_section_names_len = 0
+    for i in range(0,8):
+        if sections_values[i] != 0:
+            uni_known_section_names_len += 1
+
+    sections_values[9] = uni_section_names_len
+    sections_values[10] = uni_unknown_section_names_len
+    sections_values[11] = unknown_lines
+
+    for i in range(0,8):
+        sections_values[i + 12] = float(sections_values[i])/ number_of_sections
+
+    sections_values[21] = float(uni_known_section_names_len) / uni_section_names_len
+    sections_values[22] = float(uni_unknown_section_names_len) / uni_section_names_len
+    sections_values[23] = float(unknown_lines) / number_of_sections
+
+    return sections_values, section_names
+
+def asm_misc(asm_code):
+
+    keywords = ['Virtual','Offset','loc','Import','Imports','var','Forwarder','UINT','LONG','BOOL','WORD','BYTES','large','short','dd','db','dw','XREF','ptr','DATA','FUNCTION','extrn','byte','word','dword','char','DWORD','stdcall','arg','locret','asc','align','WinMain','unk','cookie','off','nullsub','DllEntryPoint','System32','dll','CHUNK','BASS','HMENU','DLL','LPWSTR','void','HRESULT','HDC','LRESULT','HANDLE','HWND','LPSTR','int','HLOCAL','FARPROC','ATOM','HMODULE','WPARAM','HGLOBAL','entry','rva','COLLAPSED','config','exe','Software','CurrentVersion','__imp_','INT_PTR','UINT_PTR','---Seperator','PCCTL_CONTEXT','__IMPORT_','INTERNET_STATUS_CALLBACK','.rdata:','.data:','.text:','case','installdir','market','microsoft','policies','proc','scrollwindow','search','trap','visualc','___security_cookie','assume','callvirtualalloc','exportedentry','hardware','hkey_current_user','hkey_local_machine','sp-analysisfailed','unableto']
+
+    keywords_values = [0]*len(keywords)
+    for row in asm_code:
+        #parts = row.replace(',',' ').replace('+',' ').replace('*',' ').replace('[',' ').replace(']',' ') \
+        #            .replace('-',' ').split()
+        for i in range(len(keywords)):
+            if keywords[i] in row:
+                keywords_values[i] += 1 #parts.count(opcode)
+                break
+    return keywords_values
+
+
 def feature_extraction(malware_exe_dir, benign_exe_dir, csv_file_path):
     colnames = ['filename']
     # 6 hex dump-based features
@@ -386,14 +555,15 @@ def feature_extraction(malware_exe_dir, benign_exe_dir, csv_file_path):
     colnames += ['label']
 
     malware_exe_names = os.listdir(malware_exe_dir)
-    print(malware_exe_names)
+    
+    defined_apis = read_api_file(APIS_PATH)
 
     for i, malware_exe_name in enumerate(malware_exe_names):    
         malware_exe_path = malware_exe_dir + "/" + malware_exe_name
 
         """ dump-based features """     
-       
-        int_code  = get_int_code(malware_exe_path)
+        """
+        int_code         = get_int_code(malware_exe_path)
 
         byte_oneg        = get_byte_1gram(int_code)          #   2 features
         byte_meta_data   = get_byte_meta_data(int_code)      # 256 features
@@ -401,24 +571,26 @@ def feature_extraction(malware_exe_dir, benign_exe_dir, csv_file_path):
         byte_image1      = get_byte_image1(int_code)         #  52 features     
         byte_image2      = get_byte_image2(int_code)         # 108 features 
         byte_str_lengths = get_byte_string_lengths(int_code) # 116 features
+        """
+
 
       
         """ disassemble-based features """
-        """
-        cmd_exe_to_asm = "objdump "
-        file      = open(malware_exe_path, "rb")
-        byte_code = get_byte_code(file)
-        asm_code  = disasm(byte_code, arch = 'i386')
-        print(asm_code)
+        #file      = open(malware_exe_path, "rb")        
+        #asm_code  = disasm(byte_code, arch = 'i386')     
 
-        asm_meta_data           = asm_meta_data(malware_exe_path, f)
-        """
-        #asm_symbols             = asm_symbols(f)
-        #asm_registers           = asm_registers(f)
-        #asm_opcodes             = asm_opcodes(f)
-        #asm_sections, asm_names = asm_sections(f)
+        
+        
+        asm_code       = get_asm_code(exe_path)
+        asm_meta_data          = get_asm_meta_data(asm_code)
+        asm_symbols             = get_asm_symbols(asm_code)
+        asm_registers           = get_asm_registers(asm_code)
+        asm_opcodes             = get_asm_opcodes(asm_code)
+        asm_apis                = get_asm_APIs(asm_code, defined_apis)        
+        asm_sections, asm_names = get_asm_sections(asm_code)
+
         #asm_data_defines        = asm_data_define(f)
-        #asm_apis                = asm_APIs(f,defined_apis)
+        #
 
 
 feature_extraction(malware_exe_dir, benign_exe_dir, csv_file_path)
